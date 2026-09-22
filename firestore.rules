@@ -1,0 +1,145 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: viviendas
+    // Document ID: {userId}  (Firebase Auth uid)
+    // Fields:
+    //   - ownerId: string (required, immutable, must equal userId and request.auth.uid)
+    //   - nombre: string (1-80)
+    //   - numeroHabitantes: int (1-50)
+    //   - metaMensualLitros: number (0 < x <= 10_000_000)
+    //   - localId: number (Room id)
+    //   - updatedAt: timestamp
+    //
+    // Subcollection: viviendas/{userId}/registros/{registroId}
+    // Fields:
+    //   - ownerId: string (required, immutable, must equal userId)
+    //   - localId: number
+    //   - fecha: number (epoch millis)
+    //   - lecturaMedidorM3: number (>= 0, <= 10_000_000)
+    //
+    // Subcollection: viviendas/{userId}/alertas/{alertaId}
+    // Fields:
+    //   - ownerId: string (required, immutable, must equal userId)
+    //   - localId: number
+    //   - fecha: number (epoch millis)
+    //   - nivel: string ("alto" | "precaucion" | "normal")
+    //   - porcentajeVariacion: number (-1000 .. 10000)
+    //   - descripcion: string (1-2000)
+    //   - explicacion: string optional (0-2000)
+    //   - recomendaciones: list<string> optional (max 10, each <= 300)
+    //   - advertencia: string optional (0-1000)
+    //   - fuente: string ("local" | "ia")
+    //
+    // Prototype rules: owner-only access keyed by Auth uid. Review before production.
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function ownerUnchanged() {
+      return request.resource.data.ownerId == resource.data.ownerId;
+    }
+
+    function ownerIsUid(userId) {
+      return request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.ownerId == userId;
+    }
+
+    function isValidVivienda(userId) {
+      let d = request.resource.data;
+      return d.keys().hasOnly([
+          'ownerId', 'nombre', 'numeroHabitantes',
+          'metaMensualLitros', 'localId', 'updatedAt'
+        ])
+        && ownerIsUid(userId)
+        && d.nombre is string && d.nombre.size() > 0 && d.nombre.size() <= 80
+        && d.numeroHabitantes is int && d.numeroHabitantes >= 1 && d.numeroHabitantes <= 50
+        && d.metaMensualLitros is number && d.metaMensualLitros > 0 && d.metaMensualLitros <= 10000000
+        && d.localId is number
+        && d.updatedAt is timestamp;
+    }
+
+    function isValidRegistro(userId) {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['ownerId', 'localId', 'fecha', 'lecturaMedidorM3'])
+        && ownerIsUid(userId)
+        && d.localId is number
+        && d.fecha is number && d.fecha >= 0
+        && d.lecturaMedidorM3 is number
+        && d.lecturaMedidorM3 >= 0
+        && d.lecturaMedidorM3 <= 10000000;
+    }
+
+    function validOptionalString(field, maxLen) {
+      return !(field in request.resource.data)
+        || (request.resource.data[field] is string
+          && request.resource.data[field].size() <= maxLen);
+    }
+
+    function validRecomendaciones() {
+      return !('recomendaciones' in request.resource.data)
+        || (request.resource.data.recomendaciones is list
+          && request.resource.data.recomendaciones.size() <= 10);
+    }
+
+    function isValidAlerta(userId) {
+      let d = request.resource.data;
+      return d.keys().hasOnly([
+          'ownerId', 'localId', 'fecha', 'nivel', 'porcentajeVariacion',
+          'descripcion', 'explicacion', 'recomendaciones', 'advertencia', 'fuente'
+        ])
+        && ownerIsUid(userId)
+        && d.localId is number
+        && d.fecha is number && d.fecha >= 0
+        && d.nivel is string && d.nivel in ['alto', 'precaucion', 'normal']
+        && d.porcentajeVariacion is number
+        && d.porcentajeVariacion >= -1000
+        && d.porcentajeVariacion <= 10000
+        && d.descripcion is string
+        && d.descripcion.size() > 0
+        && d.descripcion.size() <= 2000
+        && d.fuente is string && d.fuente in ['local', 'ia']
+        && validOptionalString('explicacion', 2000)
+        && validOptionalString('advertencia', 1000)
+        && validRecomendaciones();
+    }
+
+    match /viviendas/{userId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidVivienda(userId);
+      allow update: if isOwner(userId)
+        && isValidVivienda(userId)
+        && ownerUnchanged();
+      allow delete: if isOwner(userId);
+
+      match /registros/{registroId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidRegistro(userId);
+        allow update: if isOwner(userId)
+          && isValidRegistro(userId)
+          && ownerUnchanged();
+        allow delete: if isOwner(userId);
+      }
+
+      match /alertas/{alertaId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidAlerta(userId);
+        allow update: if isOwner(userId)
+          && isValidAlerta(userId)
+          && ownerUnchanged();
+        allow delete: if isOwner(userId);
+      }
+    }
+  }
+}
